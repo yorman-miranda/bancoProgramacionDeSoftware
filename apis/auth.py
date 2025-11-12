@@ -6,16 +6,18 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from database.config import get_db
-from auth import PasswordManager
+from auth.security import PasswordManager
+from auth.jwt_handler import create_access_token
 from schemas import UsuarioLogin, UsuarioCreate, UsuarioResponse, RespuestaAPI
 from crud import UserCRUD
+from auth.dependencies import get_current_user
 
 router = APIRouter(prefix="/auth", tags=["autenticación"])
 
 
-@router.post("/login", response_model=UsuarioResponse)
+@router.post("/login")
 async def login(login_data: UsuarioLogin, db: Session = Depends(get_db)):
-    """Autenticar un usuario con nombre de usuario y contraseña."""
+    """Autenticar un usuario y devolver token."""
     try:
         user = UserCRUD.authenticate(login_data.username, login_data.password)
         if not user:
@@ -23,7 +25,33 @@ async def login(login_data: UsuarioLogin, db: Session = Depends(get_db)):
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Credenciales incorrectas",
             )
-        return user
+
+        if not user.activo:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuario inactivo",
+            )
+
+        # Crear token
+        access_token = create_access_token(
+            data={
+                "sub": user.username,
+                "user_id": str(user.idUser),
+                "es_admin": user.es_admin,
+            }
+        )
+
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": {
+                "id": str(user.idUser),
+                "username": user.username,
+                "firstName": user.firstName,
+                "lastName": user.lastName,
+                "es_admin": user.es_admin,
+            },
+        }
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -35,9 +63,8 @@ async def login(login_data: UsuarioLogin, db: Session = Depends(get_db)):
     "/registro", response_model=UsuarioResponse, status_code=status.HTTP_201_CREATED
 )
 async def registrar_usuario(usuario_data: UsuarioCreate, db: Session = Depends(get_db)):
-    """Registrar un nuevo usuario."""
+    """Registrar un nuevo usuario (público)."""
     try:
-        # Verificar si el usuario ya existe
         usuario_existente = UserCRUD.get_by_username(usuario_data.username)
         if usuario_existente:
             raise HTTPException(
@@ -45,22 +72,19 @@ async def registrar_usuario(usuario_data: UsuarioCreate, db: Session = Depends(g
                 detail="El nombre de usuario ya está en uso",
             )
 
-        # Validar fortaleza de la contraseña
         es_valida, mensaje = PasswordManager.validate_password_strength(
             usuario_data.password
         )
         if not es_valida:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=mensaje)
 
-        # Crear usuario (usando un ID de creación por defecto para el primer usuario)
         usuario = UserCRUD.create(
             firstName=usuario_data.firstName,
             lastName=usuario_data.lastName,
             username=usuario_data.username,
             password=usuario_data.password,
-            id_usuario_creacion=UUID(
-                "00000000-0000-0000-0000-000000000000"
-            ),  # ID por defecto
+            id_usuario_creacion=None,  # NULL para usuarios que se auto-registran
+            es_admin=False,  # Por defecto no es admin
         )
 
         return usuario
@@ -71,6 +95,12 @@ async def registrar_usuario(usuario_data: UsuarioCreate, db: Session = Depends(g
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al registrar usuario: {str(e)}",
         )
+
+
+@router.get("/me", response_model=UsuarioResponse)
+async def obtener_usuario_actual(current_user=Depends(get_current_user)):
+    """Obtener información del usuario actual."""
+    return current_user
 
 
 @router.get("/verificar/{usuario_id}", response_model=RespuestaAPI)
@@ -91,6 +121,7 @@ async def verificar_usuario(usuario_id: UUID, db: Session = Depends(get_db)):
                 "nombre": f"{usuario.firstName} {usuario.lastName}",
                 "username": usuario.username,
                 "activo": usuario.activo,
+                "es_admin": usuario.es_admin,
             },
         )
     except HTTPException:

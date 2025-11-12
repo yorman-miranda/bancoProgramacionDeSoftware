@@ -1,7 +1,6 @@
-# auth/dependencies.py
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from .jwt_handler import verify_token
+from auth.jwt_handler import verify_token
 from crud.user_crud import UserCRUD
 
 security = HTTPBearer()
@@ -23,12 +22,17 @@ async def get_current_user(
                 detail="Credenciales inválidas",
             )
 
-        # Obtener el usuario completo de la base de datos
         user = UserCRUD.get_by_username(username)
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Usuario no encontrado",
+            )
+
+        if not user.activo:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuario inactivo",
             )
 
         return user
@@ -39,3 +43,12 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Error al validar token: {str(e)}",
         )
+
+
+async def get_current_admin(current_user=Depends(get_current_user)):
+    if not current_user.es_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tiene permisos de administrador",
+        )
+    return current_user

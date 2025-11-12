@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from database.config import get_db
 from crud import UserCRUD
-from auth import PasswordManager
+from auth.security import PasswordManager
+from auth.dependencies import get_current_user, get_current_admin
 from schemas import (
     UsuarioResponse,
     UsuarioCreate,
@@ -22,9 +23,12 @@ router = APIRouter(prefix="/usuarios", tags=["usuarios"])
 
 @router.get("/", response_model=List[UsuarioResponse])
 async def obtener_usuarios(
-    skip: int = 0, limit: int = 100, db: Session = Depends(get_db)
+    skip: int = 0,
+    limit: int = 100,
+    current_user=Depends(get_current_admin),  # Solo admin
+    db: Session = Depends(get_db),
 ):
-    """Obtener todos los usuarios con paginación."""
+    """Obtener todos los usuarios con paginación (solo administradores)."""
     try:
         usuarios = UserCRUD.get_all()
         return usuarios[skip : skip + limit]
@@ -36,9 +40,20 @@ async def obtener_usuarios(
 
 
 @router.get("/{usuario_id}", response_model=UsuarioResponse)
-async def obtener_usuario(usuario_id: UUID, db: Session = Depends(get_db)):
+async def obtener_usuario(
+    usuario_id: UUID,
+    current_user=Depends(get_current_user),  # Cualquier usuario autenticado
+    db: Session = Depends(get_db),
+):
     """Obtener un usuario por ID."""
     try:
+        # Usuarios normales solo pueden ver su propio perfil
+        if not current_user.es_admin and str(current_user.idUser) != str(usuario_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No puede ver información de otros usuarios",
+            )
+
         usuario = UserCRUD.get_by_id(usuario_id)
         if not usuario:
             raise HTTPException(
@@ -55,10 +70,13 @@ async def obtener_usuario(usuario_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.post("/", response_model=UsuarioResponse, status_code=status.HTTP_201_CREATED)
-async def crear_usuario(usuario_data: UsuarioCreate, db: Session = Depends(get_db)):
-    """Crear un nuevo usuario."""
+async def crear_usuario(
+    usuario_data: UsuarioCreate,
+    current_user=Depends(get_current_admin),  # Solo admin
+    db: Session = Depends(get_db),
+):
+    """Crear un nuevo usuario (solo administradores)."""
     try:
-        # Verificar si el usuario ya existe
         usuario_existente = UserCRUD.get_by_username(usuario_data.username)
         if usuario_existente:
             raise HTTPException(
@@ -71,7 +89,10 @@ async def crear_usuario(usuario_data: UsuarioCreate, db: Session = Depends(get_d
             lastName=usuario_data.lastName,
             username=usuario_data.username,
             password=usuario_data.password,
-            id_usuario_creacion=None,
+            id_usuario_creacion=current_user.idUser,  # ID del admin que crea
+            es_admin=(
+                usuario_data.es_admin if hasattr(usuario_data, "es_admin") else False
+            ),
         )
         return usuario
     except HTTPException:
@@ -85,10 +106,20 @@ async def crear_usuario(usuario_data: UsuarioCreate, db: Session = Depends(get_d
 
 @router.put("/{usuario_id}", response_model=UsuarioResponse)
 async def actualizar_usuario(
-    usuario_id: UUID, usuario_data: UsuarioUpdate, db: Session = Depends(get_db)
+    usuario_id: UUID,
+    usuario_data: UsuarioUpdate,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Actualizar un usuario existente."""
     try:
+        # Usuarios normales solo pueden actualizar su propio perfil
+        if not current_user.es_admin and str(current_user.idUser) != str(usuario_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No puede actualizar otros usuarios",
+            )
+
         # Verificar que el usuario existe
         usuario_existente = UserCRUD.get_by_id(usuario_id)
         if not usuario_existente:
@@ -96,9 +127,15 @@ async def actualizar_usuario(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado"
             )
 
+        # Usuarios normales no pueden cambiar el campo es_admin
+        if not current_user.es_admin and hasattr(usuario_data, "es_admin"):
+            usuario_data.es_admin = None
+
         # Filtrar campos None para actualización
         campos_actualizacion = {
-            k: v for k, v in usuario_data.dict().items() if v is not None
+            k: v
+            for k, v in usuario_data.dict(exclude_unset=True).items()
+            if v is not None
         }
 
         if not campos_actualizacion:
@@ -106,7 +143,7 @@ async def actualizar_usuario(
 
         usuario_actualizado = UserCRUD.update(
             usuario_id,
-            id_usuario_edicion=usuario_id,
+            id_usuario_edicion=current_user.idUser,  # ID del usuario que modifica
             **campos_actualizacion,
         )
         return usuario_actualizado
@@ -120,10 +157,20 @@ async def actualizar_usuario(
 
 
 @router.delete("/{usuario_id}", response_model=RespuestaAPI)
-async def eliminar_usuario(usuario_id: UUID, db: Session = Depends(get_db)):
-    """Eliminar un usuario."""
+async def eliminar_usuario(
+    usuario_id: UUID,
+    current_user=Depends(get_current_admin),  # Solo admin
+    db: Session = Depends(get_db),
+):
+    """Eliminar un usuario (solo administradores)."""
     try:
-        # Verificar que el usuario existe
+        # No permitir auto-eliminación
+        if str(current_user.idUser) == str(usuario_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No puede eliminarse a sí mismo",
+            )
+
         usuario_existente = UserCRUD.get_by_id(usuario_id)
         if not usuario_existente:
             raise HTTPException(
@@ -149,25 +196,35 @@ async def eliminar_usuario(usuario_id: UUID, db: Session = Depends(get_db)):
 
 @router.post("/{usuario_id}/cambiar-contraseña", response_model=RespuestaAPI)
 async def cambiar_contraseña(
-    usuario_id: UUID, cambio_data: CambioContraseña, db: Session = Depends(get_db)
+    usuario_id: UUID,
+    cambio_data: CambioContraseña,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Cambiar la contraseña de un usuario."""
     try:
-        # Verificar que el usuario existe
+        # Usuarios normales solo pueden cambiar su propia contraseña
+        if not current_user.es_admin and str(current_user.idUser) != str(usuario_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No puede cambiar contraseña de otros usuarios",
+            )
+
         usuario_existente = UserCRUD.get_by_id(usuario_id)
         if not usuario_existente:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado"
             )
 
-        # Verificar contraseña actual
-        if not UserCRUD.authenticate(
-            usuario_existente.username, cambio_data.contraseña_actual
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Contraseña actual incorrecta",
-            )
+        # Si no es admin, verificar contraseña actual
+        if not current_user.es_admin:
+            if not UserCRUD.authenticate(
+                usuario_existente.username, cambio_data.contraseña_actual
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Contraseña actual incorrecta",
+                )
 
         # Validar nueva contraseña
         es_valida, mensaje = PasswordManager.validate_password_strength(
@@ -179,7 +236,7 @@ async def cambiar_contraseña(
         # Actualizar contraseña
         usuario_actualizado = UserCRUD.update(
             usuario_id,
-            id_usuario_edicion=usuario_id,
+            id_usuario_edicion=current_user.idUser,
             password=cambio_data.nueva_contraseña,
         )
 

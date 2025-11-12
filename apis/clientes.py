@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from database.config import get_db
 from crud import ClienteCRUD
+from auth.dependencies import get_current_user, get_current_admin
 from schemas import ClienteResponse, ClienteCreate, ClienteUpdate, RespuestaAPI
 
 router = APIRouter(prefix="/clientes", tags=["clientes"])
@@ -15,7 +16,10 @@ router = APIRouter(prefix="/clientes", tags=["clientes"])
 
 @router.get("/", response_model=List[ClienteResponse])
 async def obtener_clientes(
-    skip: int = 0, limit: int = 100, db: Session = Depends(get_db)
+    skip: int = 0,
+    limit: int = 100,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Obtener todos los clientes con paginación."""
     try:
@@ -29,7 +33,11 @@ async def obtener_clientes(
 
 
 @router.get("/{cliente_id}", response_model=ClienteResponse)
-async def obtener_cliente(cliente_id: UUID, db: Session = Depends(get_db)):
+async def obtener_cliente(
+    cliente_id: UUID,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Obtener un cliente por ID."""
     try:
         cliente = ClienteCRUD.get_by_id(cliente_id)
@@ -48,7 +56,11 @@ async def obtener_cliente(cliente_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.post("/", response_model=ClienteResponse, status_code=status.HTTP_201_CREATED)
-async def crear_cliente(cliente_data: ClienteCreate, db: Session = Depends(get_db)):
+async def crear_cliente(
+    cliente_data: ClienteCreate,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Crear un nuevo cliente."""
     try:
         cliente = ClienteCRUD.create(
@@ -59,7 +71,7 @@ async def crear_cliente(cliente_data: ClienteCreate, db: Session = Depends(get_d
             email=cliente_data.email,
             idUsuario=cliente_data.idUsuario,
             idSucursal=cliente_data.idSucursal,
-            id_usuario_creacion=cliente_data.idUsuario,  # Usar el mismo usuario como creador
+            id_usuario_creacion=current_user.idUser,  # Usar ID del usuario logueado
         )
         return cliente
     except Exception as e:
@@ -71,20 +83,23 @@ async def crear_cliente(cliente_data: ClienteCreate, db: Session = Depends(get_d
 
 @router.put("/{cliente_id}", response_model=ClienteResponse)
 async def actualizar_cliente(
-    cliente_id: UUID, cliente_data: ClienteUpdate, db: Session = Depends(get_db)
+    cliente_id: UUID,
+    cliente_data: ClienteUpdate,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Actualizar un cliente existente."""
     try:
-        # Verificar que el cliente existe
         cliente_existente = ClienteCRUD.get_by_id(cliente_id)
         if not cliente_existente:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Cliente no encontrado"
             )
 
-        # Filtrar campos None para actualización
         campos_actualizacion = {
-            k: v for k, v in cliente_data.dict().items() if v is not None
+            k: v
+            for k, v in cliente_data.dict(exclude_unset=True).items()
+            if v is not None
         }
 
         if not campos_actualizacion:
@@ -92,7 +107,7 @@ async def actualizar_cliente(
 
         cliente_actualizado = ClienteCRUD.update(
             cliente_id,
-            id_usuario_edicion=cliente_existente.idUsuario,
+            id_usuario_edicion=current_user.idUser,  # ID del usuario que modifica
             **campos_actualizacion,
         )
         return cliente_actualizado
@@ -106,10 +121,13 @@ async def actualizar_cliente(
 
 
 @router.delete("/{cliente_id}", response_model=RespuestaAPI)
-async def eliminar_cliente(cliente_id: UUID, db: Session = Depends(get_db)):
-    """Eliminar un cliente."""
+async def eliminar_cliente(
+    cliente_id: UUID,
+    current_user=Depends(get_current_admin),  # Solo admin
+    db: Session = Depends(get_db),
+):
+    """Eliminar un cliente (solo administradores)."""
     try:
-        # Verificar que el cliente existe
         cliente_existente = ClienteCRUD.get_by_id(cliente_id)
         if not cliente_existente:
             raise HTTPException(
