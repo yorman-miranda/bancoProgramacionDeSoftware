@@ -65,7 +65,7 @@ async def lifespan(app: FastAPI):
 #     # Aquí podrías inicializar datos por defecto si es necesario
 #     from database.config import create_tables
 
-#     create_tables()
+#      create_tables()
 
 #     print("✅ Sistema listo para usar.")
 #     print("📚 Documentación disponible en: http://localhost:8000/docs")
