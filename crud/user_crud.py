@@ -2,7 +2,6 @@ from datetime import datetime
 from entities.user import User
 from database.config import get_session
 from auth.security import PasswordManager
-import uuid
 
 
 class UserCRUD:
